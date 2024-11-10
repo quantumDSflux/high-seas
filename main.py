@@ -1,195 +1,118 @@
-import pygame
-import sys
-import random
+import cv2
+import mediapipe as mp
+from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+import math
+import time
 
-# Initialize Pygame
-pygame.init()
+# Initialize MediaPipe Hands for hand gesture recognition
+mp_hands = mp.solutions.hands
+hands = mp_hands.Hands(min_detection_confidence=0.7, min_tracking_confidence=0.7)
+mp_drawing = mp.solutions.drawing_utils
 
-# Screen settings
-WIDTH, HEIGHT = 600, 600
-GRID_SIZE = 10
-CELL_SIZE = WIDTH // GRID_SIZE
-screen = pygame.display.set_mode((WIDTH, HEIGHT))
-pygame.display.set_caption("Laser Shooting Game")
+# Access the system's audio device for volume control
+devices = AudioUtilities.GetSpeakers()
+interface = devices.Activate(
+    IAudioEndpointVolume._iid_, 0, None)
+volume = interface.QueryInterface(IAudioEndpointVolume)
 
-# Colors
-WHITE = (255, 255, 255)
-BLACK = (0, 0, 0)
-RED = (255, 0, 0)
-BLUE = (0, 0, 255)
-GREEN = (0, 255, 0)  # Color for obstacles
+# Set up camera 1 (change from default camera)
+cap = cv2.VideoCapture(1)  # Use camera 1
 
-# Fonts
-font = pygame.font.Font(None, 36)
+# Variable to handle mute/unmute logic
+last_fist_time = 0
+is_muted = False
+fist_closed = False
 
-# Game settings
-laser_pos = (0, 0)  # Starting position of the laser shooter
-laser_direction = (1, 0)  # Initial direction (moving right)
+def is_fist(hand_landmarks):
+    """Detects if the hand is a fist by checking the proximity of fingertips to palm."""
+    for i in range(1, 5):  # Check the distances between the tips and base of the fingers
+        finger_tip = hand_landmarks.landmark[mp_hands.HandLandmark(i + 3)]
+        finger_base = hand_landmarks.landmark[mp_hands.HandLandmark(i)]
+        
+        # If the finger tip is very close to the palm, it's likely a fist
+        if math.sqrt((finger_tip.x - finger_base.x) ** 2 + (finger_tip.y - finger_base.y) ** 2) > 0.04:
+            return False
+    return True
 
-# Levels (including mirrors as part of each level)
-levels = [
-    {"target": (9, 9), "mirrors": {}, "obstacles": set()},
-    {"target": (8, 2), "mirrors": {}, "obstacles": set()},
-    {"target": (2, 7), "mirrors": {}, "obstacles": set()},
-    {"target": (5, 5), "mirrors": {}, "obstacles": set()},
-    {"target": (3, 8), "mirrors": {}, "obstacles": set()}
-]
+while True:
+    # Capture frame-by-frame
+    ret, frame = cap.read()
 
-max_levels = len(levels)
+    if not ret:
+        break
 
-# Function to generate obstacles for each level
-def generate_obstacles(level):
-    num_obstacles = level * 5  # Increase obstacles per level (5 obstacles per level)
-    num_obstacles = min(num_obstacles, 26)  # Limit to a maximum of 26 obstacles
-    obstacles = set()
+    # Flip the image horizontally for a later selfie-view display
+    frame = cv2.flip(frame, 1)
 
-    # Ensure obstacles don't overlap with target position
-    target_pos = levels[level-1]["target"]
-    
-    while len(obstacles) < num_obstacles:
-        x = random.randint(0, GRID_SIZE - 1)
-        y = random.randint(0, GRID_SIZE - 1)
-        if (x, y) != target_pos and (x, y) not in obstacles:
-            obstacles.add((x, y))
-    
-    return obstacles
+    # Convert the BGR image to RGB
+    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-# Reset level state
-def reset_level():
-    global laser_pos, laser_direction, target_pos, click_counts, obstacles
-    laser_pos = (0, 0)
-    laser_direction = (1, 0)
-    target_pos = levels[current_level]["target"]
-    obstacles = generate_obstacles(current_level + 1)  # Add more obstacles as the level increases
-    click_counts = {}  # Clear mirrors for the new level
+    # Process the frame and get hand landmarks
+    results = hands.process(rgb_frame)
 
-# Initialize first level
-current_level = 0
-reset_level()
+    if results.multi_hand_landmarks:
+        if len(results.multi_hand_landmarks) == 1:
+            hand_landmarks = results.multi_hand_landmarks[0]
 
-# Create a dictionary to track click counts for each cell
-click_counts = {}
+            # Draw hand landmarks
+            mp_drawing.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
 
-# Main game loop
-running = True
-while running:
-    screen.fill(WHITE)
+            # Check for fist gesture
+            if is_fist(hand_landmarks):
+                current_time = time.time()
 
-    # Draw level number at the top of the screen
-    level_text = font.render(f"Level {current_level + 1}/{max_levels}", True, BLACK)
-    screen.blit(level_text, (10, 10))
+                # If fist is detected for the first time, toggle mute/unmute
+                if not fist_closed:
+                    if is_muted:
+                        # Unmute and set volume to 15%
+                        volume.SetMute(0, None)  # Unmute
+                        volume.SetMasterVolumeLevelScalar(0.15, None)  # Set volume to 15%
+                        print("Unmuted and set volume to 15%")
+                    else:
+                        # Mute the volume
+                        volume.SetMute(1, None)  # Mute
+                        print("Muted")
+                    is_muted = not is_muted
+                    fist_closed = True  # Mark that fist has been closed
+                    last_fist_time = current_time
 
-    # Draw grid
-    for x in range(0, WIDTH, CELL_SIZE):
-        pygame.draw.line(screen, BLACK, (x, 0), (x, HEIGHT))
-    for y in range(0, HEIGHT, CELL_SIZE):
-        pygame.draw.line(screen, BLACK, (0, y), (WIDTH, y))
-
-    # Draw laser shooter as a red circle
-    shooter_rect_center = (
-        laser_pos[0] * CELL_SIZE + CELL_SIZE // 2,
-        laser_pos[1] * CELL_SIZE + CELL_SIZE // 2
-    )
-    pygame.draw.circle(screen, RED, shooter_rect_center, CELL_SIZE // 4)
-
-    # Draw target as a blue circle
-    target_rect_center = (
-        target_pos[0] * CELL_SIZE + CELL_SIZE // 2,
-        target_pos[1] * CELL_SIZE + CELL_SIZE // 2
-    )
-    pygame.draw.circle(screen, BLUE, target_rect_center, CELL_SIZE // 4)
-
-    # Draw obstacles as green rectangles
-    for obstacle in obstacles:
-        pygame.draw.rect(screen, BLACK, (obstacle[0] * CELL_SIZE, obstacle[1] * CELL_SIZE, CELL_SIZE, CELL_SIZE))
-
-    # Draw mirrors from the click_counts dictionary
-    for pos, mirror_state in click_counts.items():
-        if mirror_state == 1:  # First click, place '/'
-            pygame.draw.line(screen, RED, 
-                             (pos[0] * CELL_SIZE, pos[1] * CELL_SIZE), 
-                             ((pos[0] + 1) * CELL_SIZE, (pos[1] + 1) * CELL_SIZE), 3)
-        elif mirror_state == 2:  # Second click, place '//'
-            pygame.draw.line(screen, RED, 
-                             (pos[0] * CELL_SIZE, (pos[1] + 1) * CELL_SIZE), 
-                             ((pos[0] + 1) * CELL_SIZE, pos[1] * CELL_SIZE), 3)
-
-    # Laser mechanics
-    current_pos = list(laser_pos)
-    direction = laser_direction
-    laser_path = []
-
-    while True:
-        # Move laser position
-        current_pos[0] += direction[0]
-        current_pos[1] += direction[1]
-        laser_path.append(tuple(current_pos))
-
-        # Check boundaries
-        if not (0 <= current_pos[0] < GRID_SIZE and 0 <= current_pos[1] < GRID_SIZE):
-            break
-
-        # Check target hit
-        if tuple(current_pos) == target_pos:
-            print("Target Hit! Moving to next level...")
-            current_level += 1
-            if current_level < max_levels:
-                reset_level()
             else:
-                print("Congratulations! You completed all levels!")
-                running = False
-            break
+                # If the hand is not in a fist, reset the fist_closed flag
+                fist_closed = False
 
-        # Check for obstacles (laser stops here)
-        if tuple(current_pos) in obstacles:
-            break
+        # If two hands are detected, control volume based on wrist distance
+        if len(results.multi_hand_landmarks) == 2:
+            hand1_landmarks = results.multi_hand_landmarks[0]
+            hand2_landmarks = results.multi_hand_landmarks[1]
 
-        # Check for mirrors and reflect
-        if tuple(current_pos) in click_counts:
-            mirror_state = click_counts[tuple(current_pos)]
-            if mirror_state == 1:  # '/' mirror
-                if direction == (1, 0):    # Right
-                    direction = (0, 1)    # Down
-                elif direction == (-1, 0): # Left
-                    direction = (0, -1)   # Up
-                elif direction == (0, 1):  # Down
-                    direction = (1, 0)    # Right
-                elif direction == (0, -1): # Up
-                    direction = (-1, 0)   # Left
-            elif mirror_state == 2:  # '//' mirror
-                if direction == (1, 0):    # Right
-                    direction = (0, -1)   # Up
-                elif direction == (-1, 0): # Left
-                    direction = (0, 1)    # Down
-                elif direction == (0, 1):  # Down
-                    direction = (-1, 0)   # Left
-                elif direction == (0, -1): # Up
-                    direction = (1, 0)    # Right
+            wrist1 = hand1_landmarks.landmark[mp_hands.HandLandmark.WRIST]
+            wrist2 = hand2_landmarks.landmark[mp_hands.HandLandmark.WRIST]
 
-    # Draw the laser path as a thin red line (laser beam)
-    for i in range(len(laser_path) - 1):
-        start_pos = (laser_path[i][0] * CELL_SIZE + CELL_SIZE // 2, laser_path[i][1] * CELL_SIZE + CELL_SIZE // 2)
-        end_pos = (laser_path[i + 1][0] * CELL_SIZE + CELL_SIZE // 2, laser_path[i + 1][1] * CELL_SIZE + CELL_SIZE // 2)
-        pygame.draw.line(screen, RED, start_pos, end_pos, 2)  # Thin red line for laser beam
+            # Calculate the distance between the two wrists
+            distance = math.sqrt((wrist2.x - wrist1.x)**2 + (wrist2.y - wrist1.y)**2)
 
-    # Event handling
-    for event in pygame.event.get():
-        if event.type == pygame.QUIT:
-            pygame.quit()
-            sys.exit()
-        elif event.type == pygame.MOUSEBUTTONDOWN:
-            # Get the position of the mouse click
-            mouse_x, mouse_y = pygame.mouse.get_pos()
-            grid_x = mouse_x // CELL_SIZE
-            grid_y = mouse_y // CELL_SIZE
-            cell = (grid_x, grid_y)
-            
-            # Cycle through the mirror states (1: '/', 2: '//', 0: no mirror)
-            if cell in click_counts:
-                click_counts[cell] += 1
-                if click_counts[cell] > 2:
-                    del click_counts[cell]  # Remove the mirror after the third click
+            # Map this distance to a volume level
+            min_distance = 0.1  # Minimum distance for volume change
+            max_distance = 0.4  # Maximum distance for volume change
+
+            if distance < min_distance:
+                new_volume = 0.0  # Minimum volume
+            elif distance > max_distance:
+                new_volume = 1.0  # Maximum volume
             else:
-                click_counts[cell] = 1  # First click, place '/'
+                # Normalize the volume level based on distance
+                new_volume = (distance - min_distance) / (max_distance - min_distance)
 
-    pygame.display.flip()
+            # Set the system volume
+            volume.SetMasterVolumeLevelScalar(new_volume, None)
+
+    # Display the resulting frame
+    cv2.imshow("Hand Gesture Volume Control", frame)
+
+    # Break the loop if the user presses the 'q' key
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+# Release the capture and close OpenCV windows
+cap.release()
+cv2.destroyAllWindows()
